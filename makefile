@@ -8,6 +8,6 @@ bin/%: %.cu
 	${NVCC} ${CFLAGS} ${INCDIR} ${LIBDIR} $< -o $@ ${LIB} 
 
 
-all: bin/gemm_v01
+all: bin/gemm_v01 bin/gemm_v02
 
 .PHONY:all
