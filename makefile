@@ -1,13 +1,14 @@
 NVCC = nvcc
-CFLAGS = -std=c++11
+CXXFLAGS = -std=c++11 
+CUFLAGS = -arch=sm_70
 INCDIR = 
-LIBDIR  = 
-LIB = -lm
+LIBDIR = 
+LIB = 
 
 bin/%: %.cu
-	${NVCC} ${CFLAGS} ${INCDIR} ${LIBDIR} $< -o $@ ${LIB} 
+	${NVCC} ${CXXFLAGS} ${CUFLAGS} ${INCDIR} ${LIBDIR} $< -o $@ ${LIB} 
 
 
-all: bin/gemm_v01 bin/gemm_v02
+all: bin/main_fp32
 
 .PHONY:all
