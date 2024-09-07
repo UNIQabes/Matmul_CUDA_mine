@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <mma.h>
+
 //タイリングの階層は
 //ブロックタイル(シェアードメモリの容量/2くらい z方向はベクタータイルの数分行えればそれでよい)>イテレータータイル(ブロックタイル/ワープタイル)>ワープタイル(32)>ベクタータイル(kの分割)
 //これに加えて、ワープシャッフルも使っていこうと思う
@@ -134,26 +135,7 @@ __global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr)
 		}
 		__syncthreads();
 
-		if(Midx_ThisBlockBlockTile==0&&Midx_ThisWarpWarpTileInBT==0)
-		{
-			for(int i=0;i<BLOCKTILE_KSIZE;i++)
-			{
-				if(ATransposed_OnShared[i][0]!=0)
-				{
-					//printf("f\n");
-				}
-			}
-		}
-		if(Nidx_ThisBlockBlockTile==0&&Nidx_ThisWarpWarpTileInBT==0)
-		{
-			for(int i=0;i<BLOCKTILE_KSIZE;i++)
-			{
-				if(B_OnShared[i][0]!=0)
-				{
-					//printf("f\n");
-				}
-			}
-		}
+	
 
 		
 
@@ -170,44 +152,20 @@ __global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr)
 			//threadLinearIdxInWarp番目のスレッドが読み込むのは、列(M)方向で(threadLinearIdxInWarp/ITERTILE_MSIZE)番目のIterationTileの計算で、(threadLinearIdxInWarp%ITERTILE_MSIZE)*ITERTILE_NSIZE+(0~ITERTILE_NSIZE)番目のスレッドが使う値。
 			//-> i * ITERTILE_MSIZE + (threadLinearIdxInWarp/ITERTILE_NSIZE_INWT)%ITERTILE_MSIZE_INWT番目のスレッドが読み込んだ値を全て受け取れば良い。
 			float A_BroadCastNum=ATransposed_OnShared[num_kIdxInBT][WARPTILE_MSIZE*Midx_ThisWarpWarpTileInBT+threadLinearIdxInWarp];
-			if(Midx_ThisBlockBlockTile==0&&Midx_ThisWarpWarpTileInBT==0&&Midx_ThisThreadCalNumInIT==0&&threadLinearIdxInWarp==0)
-			{
-				if(A_BroadCastNum!=0)
-				{
-					//printf("RegA\n");
-				}
-			}
 			//列(M)方向の0~(ITERTILE_MDIMNUM_INWT-1)番目のイテレーションタイル内の、自分の担当するCの要素の計算で使うAの値を読み込む
 			for(int MDim_IterTileIdx=0;MDim_IterTileIdx<ITERTILE_MDIMNUM_INWT;MDim_IterTileIdx++)
 			{
 				A_RegCachedNum[MDim_IterTileIdx]=__shfl_sync(0xffffffff,A_BroadCastNum,MDim_IterTileIdx*ITERTILE_MSIZE + threadLinearIdxInWarp/ITERTILE_NSIZE);
 			}
-			if(Midx_ThisBlockBlockTile==0&&Midx_ThisWarpWarpTileInBT==0&&Midx_ThisThreadCalNumInIT==0 && A_RegCachedNum[0]!=0)
-			{
-				//printf("A\n");
-			}
-
 
 			//threadLinearIdxInWarp番目のスレッドが読み込むのは、行(N)方向で(threadLinearIdxInWarp/ITERTILE_NSIZE)番目のIterationTileの計算で、threadLinearIdxInWarp%ITERTILE_NSIZEの値が同じになるスレッドが使う値。
 			//->i * ITERTILE_NSIZE + threadLinearIdxInWarp%ITERTILE_NSIZE番目のスレッドが読み込んだ値を全て受け取れば良い。
 			float B_BroadCastNum=B_OnShared[num_kIdxInBT][WARPTILE_NSIZE*Nidx_ThisWarpWarpTileInBT+threadLinearIdxInWarp];
-			if(Nidx_ThisBlockBlockTile==0&&Nidx_ThisWarpWarpTileInBT==0&&Nidx_ThisThreadCalNumInIT==0&&threadLinearIdxInWarp==0)
-			{
-				if(B_BroadCastNum!=0)
-				{
-					//printf("RegB\n");
-				}
-			}
 			//行(N)方向の0~(ITERTILE_NDIMNUM_INWT-1)番目のイテレーションタイル内の、自分の担当するCの要素の計算で使うBの値を読み込む
 			for(int NDim_IterTileIdx=0;NDim_IterTileIdx<ITERTILE_NDIMNUM_INWT;NDim_IterTileIdx++)
 			{
 				B_RegCachedNum[NDim_IterTileIdx]=__shfl_sync(0xffffffff,B_BroadCastNum,NDim_IterTileIdx*ITERTILE_NSIZE + threadLinearIdxInWarp%ITERTILE_NSIZE);
 			}
-			if(Nidx_ThisBlockBlockTile==0&&Nidx_ThisWarpWarpTileInBT==0&&Nidx_ThisThreadCalNumInIT==0 && B_RegCachedNum[0]!=0)
-			{
-				//printf("B\n");
-			}
-			
 			//(MDim_IterTileIdx,NDim_IterTileIdx)番目のIterTileを内の自分が担当するCの値に足し込む積を計算する
 			for(int MDim_IterTileIdx=0;MDim_IterTileIdx<ITERTILE_MDIMNUM_INWT;MDim_IterTileIdx++)
 			{
@@ -221,26 +179,7 @@ __global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr)
 		}
 		__syncthreads();
 	}
-	if(Midx_ThisBlockBlockTile==0&&Midx_ThisWarpWarpTileInBT==0&&Midx_ThisThreadCalNumInIT==0)
-	{
-		for(int i=0;i<ITERTILE_NDIMNUM_INWT;i++)
-		{
-			if(thisThreadCal_ABResult[0][i]!=0)
-			{
-				//printf("A:(%d,%d)>(%d,%d)>(0,%d)\n",Midx_ThisBlockBlockTile,Nidx_ThisBlockBlockTile,Midx_ThisWarpWarpTileInBT,Nidx_ThisWarpWarpTileInBT,i*ITERTILE_NSIZE);
-			}
-		}
-	}
-	if(Nidx_ThisBlockBlockTile==0&&Nidx_ThisWarpWarpTileInBT==0&&Nidx_ThisThreadCalNumInIT==0)
-	{
-		for(int i=0;i<ITERTILE_MDIMNUM_INWT;i++)
-		{
-			if(thisThreadCal_ABResult[i][0]!=0)
-			{
-				//printf("B:(%d,%d)>(%d,%d)>(%d,0)\n",Midx_ThisBlockBlockTile,Nidx_ThisBlockBlockTile,Midx_ThisWarpWarpTileInBT,Nidx_ThisWarpWarpTileInBT,i*ITERTILE_MSIZE);
-			}
-		}
-	}
+	
 	
 	//Cの値をグローバルメモリから読み込む
 	//0~7番のスレッドは8~15番のスレッドに(1,0)~(1,7)の値をもらう。
@@ -296,23 +235,7 @@ __global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr)
 			C_On1ShuffleTile[receiveNum_BelongMemAccessTileMIdxInST]=__shfl_sync(0xffffffff,thisThreadCal_ABResult[shuffleTile_MIdxInWT][sendNum_BelongIterTileNIdx],srcLane);
 		}
 
-		if(Midx_ThisBlockBlockTile==0&&Midx_ThisWarpWarpTileInBT==0 && shuffleTile_MIdxInWT==0)
-		{
-			if(C_On1ShuffleTile[0]!=0)
-			{
-				//printf("m_shuffleTile\n");
-			}	
-		}
-		if(Nidx_ThisBlockBlockTile==0&&Nidx_ThisWarpWarpTileInBT==0 && threadLinearIdxInWarp==0)
-		{
-			for(int i=0;i<SHUFFLETILE_MSIZE;i++)
-			{
-				if(C_On1ShuffleTile[i]!=0)
-				{
-					//printf("n_shuffleTile\n");
-				}
-			}
-		}
+		
 		//Cの元の値にABを足し合わせる
 		//Cの値をグローバルメモリに書き込む
 		const int MIdx_ShuffleTileStartInC=Midx_ThisWarpWarpTileStartInC+shuffleTile_MIdxInWT*SHUFFLETILE_MSIZE;
