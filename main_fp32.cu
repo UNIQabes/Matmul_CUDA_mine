@@ -99,66 +99,53 @@ __global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr)
 
 	//それぞれのIterTile内の自分が担当するA*Bの値の途中計算の結果を保持する
 	float thisThreadCal_ABResult[ITERTILE_MDIMNUM_INWT][ITERTILE_NDIMNUM_INWT]={0};
-	/*
-	if(threadLinearIdxInBlock==0)
-	{
-		printf("%d, %d, %d\n",Midx_ThisBlockBlockTile,Nidx_ThisBlockBlockTile,threadLinearIdxInBlock);
-	}
-	*/
+	
+	//if(threadLinearIdxInBlock==0){printf("%d, %d, %d\n",Midx_ThisBlockBlockTile,Nidx_ThisBlockBlockTile,threadLinearIdxInBlock);}
+	
 	///このブロックの計算に使うA/Bのブロックタイルの中で、blockTile_kIdx番目のブロックタイルを読み込み、それについての計算を行う。
 	for(int blockTile_kIdx=0;blockTile_kIdx<BLOCKTILE_KDIMNUM;blockTile_kIdx++)
 	{
-		if(threadLinearIdxInBlock==0)
-		{
-			//printf("(%d,%d):カーネル2\n",Midx_ThisBlockBlockTile,Nidx_ThisBlockBlockTile);
-		}
-		__syncthreads();
-		if(threadLinearIdxInBlock==0)
-		{
-			printf("(%d,%d):カーネル3\n",Midx_ThisBlockBlockTile,Nidx_ThisBlockBlockTile);
-		}
 		//Aをブロックタイルで分割した時の(blockIdx.y, blockTile_kIdx)番目のブロックをシェアードメモリに読み込む
-		const int A_LoadBlockStartRowIdx=Midx_ThisBlockBlockTileStartInC;
-		const int A_LoadBlockStartColIdx=blockTile_kIdx*BLOCKTILE_KDIMNUM;
+		const int A_LoadBlockStartMIdx=Midx_ThisBlockBlockTileStartInC;
+		const int A_LoadBlockStartKIdx=blockTile_kIdx*BLOCKTILE_KSIZE;
 		for(int i=0;i<A_LOAD1BLOCKTILETOSHARED_ITERATIONNUM;i++)
 		{
 			const int loadNum_LinearIdxInBlock=i*THREADNUM_INBLOCK+threadLinearIdxInBlock;
-			const int loadNum_RowIdxInBlock=loadNum_LinearIdxInBlock/BLOCKTILE_KDIMNUM;
-			const int loadNum_ColIdxInBlock=loadNum_LinearIdxInBlock%BLOCKTILE_KDIMNUM;
-			const int loadNum_RowIdx=A_LoadBlockStartRowIdx+loadNum_RowIdxInBlock;
-			const int loadNum_ColIdx=A_LoadBlockStartColIdx+loadNum_ColIdxInBlock;
-
-			ATransposed_OnShared[loadNum_ColIdxInBlock][loadNum_RowIdxInBlock]=A_devPtr[BLOCKTILE_KSIZE*loadNum_RowIdx+loadNum_ColIdx];
+			const int loadNum_RowIdxInBlock=loadNum_LinearIdxInBlock/BLOCKTILE_KSIZE;
+			const int loadNum_ColIdxInBlock=loadNum_LinearIdxInBlock%BLOCKTILE_KSIZE;
+			const int loadNum_MIdx=A_LoadBlockStartMIdx+loadNum_RowIdxInBlock;
+			const int loadNum_KIdx=A_LoadBlockStartKIdx+loadNum_ColIdxInBlock;
+			__syncthreads();
+			//if(threadLinearIdxInBlock==127){printf("(%d, %d, %d) : _shared(%d,%d) Dev(%d,%d)\n",Midx_ThisBlockBlockTile,Nidx_ThisBlockBlockTile,threadLinearIdxInBlock,loadNum_RowIdxInBlock,loadNum_ColIdxInBlock,loadNum_MIdx,loadNum_KIdx);}
+			__syncthreads();
+			ATransposed_OnShared[loadNum_ColIdxInBlock][loadNum_RowIdxInBlock]=A_devPtr[BLOCKTILE_KSIZE*loadNum_MIdx+loadNum_KIdx];
 			
 		}
-		if(threadLinearIdxInBlock==0)
-		{
-			printf("カーネル2\n");
-		}
-
+		
 		//Bをブロックタイルで分割した時の(blockTile_kIdx,blockIdx.x)番目のブロックをシェアードメモリに読み込む
-		const int B_LoadBlockStartRowIdx=blockTile_kIdx*BLOCKTILE_KDIMNUM;
+		const int B_LoadBlockStartRowIdx=blockTile_kIdx*BLOCKTILE_KSIZE;
 		const int B_LoadBlockStartColIdx=Nidx_ThisBlockBlockTileStartInC;
 		for(int i=0;i<B_LOAD1BLOCKTILETOSHARED_ITERATIONNUM;i++)
 		{
 			const int loadNum_LinearIdxInBlock=i*THREADNUM_INBLOCK+threadLinearIdxInBlock;
-			const int loadNum_RowIdxInBlock=loadNum_LinearIdxInBlock/BLOCKTILE_NDIMNUM;
-			const int loadNum_ColIdxInBlock=loadNum_LinearIdxInBlock%BLOCKTILE_NDIMNUM;
+			const int loadNum_RowIdxInBlock=loadNum_LinearIdxInBlock/BLOCKTILE_NSIZE;
+			const int loadNum_ColIdxInBlock=loadNum_LinearIdxInBlock%BLOCKTILE_NSIZE;
 			const int loadNum_RowIdx=B_LoadBlockStartRowIdx+loadNum_RowIdxInBlock;
 			const int loadNum_ColIdx=B_LoadBlockStartColIdx+loadNum_ColIdxInBlock;
 
 			B_OnShared[loadNum_RowIdxInBlock][loadNum_ColIdxInBlock]=B_devPtr[BLOCKTILE_NSIZE*loadNum_RowIdx +loadNum_ColIdx];
 		}
 		__syncthreads();
-		
+
+
 
 		//Cの各要素はAの行ベクトルとBの列ベクトルの内積。その2つのベクトルのblockTile_kIdx*BLOCKTILE_KSIZE+num_kIdxInBT番目の値の積を求め、和に足しこむ
-		for(int num_kIdxInBT=0;num_kIdxInBT<BLOCKTILE_KDIMNUM;num_kIdxInBT++)
+		for(int num_kIdxInBT=0;num_kIdxInBT<BLOCKTILE_KSIZE;num_kIdxInBT++)
 		{
 			//[行/列]方向の0~([ITERTILE_NDIMNUM_INWT/ITERTILE_MDIMNUM_INWT]-1)番目のイテレーションタイル内の、自分の担当するCの要素の計算で使う[B/A]の値を読み込む配列。
 			//レジスタにキャッシュして再利用するために宣言
-			float A_RegCachedNum[ITERTILE_NDIMNUM_INWT];
-			float B_RegCachedNum[ITERTILE_MDIMNUM_INWT];
+			float A_RegCachedNum[ITERTILE_MDIMNUM_INWT];
+			float B_RegCachedNum[ITERTILE_NDIMNUM_INWT];
 
 			//メモリバンクをフルに使って、ワープタイル中の全ての値についての計算で必要な値全てがワープ内のどこかのレジスタに読みこまれている状態にする。
 
@@ -187,11 +174,13 @@ __global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr)
 				
 				for(int NDim_IterTileIdx=0;NDim_IterTileIdx<ITERTILE_NDIMNUM_INWT;NDim_IterTileIdx++)
 				{
-					thisThreadCal_ABResult[MDim_IterTileIdx][NDim_IterTileIdx]=A_RegCachedNum[MDim_IterTileIdx]*B_RegCachedNum[NDim_IterTileIdx];
+					thisThreadCal_ABResult[MDim_IterTileIdx][NDim_IterTileIdx]+=A_RegCachedNum[MDim_IterTileIdx]*B_RegCachedNum[NDim_IterTileIdx];
 				}
 			}
 		}
+
 	}
+
 	
 	//Cの値をグローバルメモリから読み込む
 	//0~7番のスレッドは8~15番のスレッドに(1,0)~(1,7)の値をもらう。
@@ -234,13 +223,18 @@ __global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr)
 
 	for(int shuffleTile_MIdxInWT=0;shuffleTile_MIdxInWT<SHUFFLETILE_MDIMNUM_INWT;shuffleTile_MIdxInWT++)
 	{
+		//自分がすでに持っているABの計算結果の値を格納する
+		//0~7スレッド目はIterTiles[n][0]の中の自分が担当していた値　8~15スレッド目はIterTiles[n][1]の自分が担当していた値 ・・・
+		//一般化して、IterTiles[n][threadLinearIdx/8]の中の自分が担当していた値
+		//shuffleTileのM方向の大きさ。= IterTileのM方向の大きさなので、nはshuffleTile_MIdxInWTで置き換えられる。
+		C_On1ShuffleTile[threadLinearIdxInWarp/ITERTILE_NSIZE]=thisThreadCal_ABResult[shuffleTile_MIdxInWT][threadLinearIdxInWarp/ITERTILE_NSIZE];
 		//他のワープからABの計算結果の値を受け取る
 		for(int memAccessTile_MWrapInST=0;memAccessTile_MWrapInST<MEMACCESSTILE_MDIMNUM_INST-1;memAccessTile_MWrapInST++)
 		{
 			const int receiveNum_BelongMemAccessTileMIdxInST=(threadLinearIdxInWarp/ITERTILE_NSIZE+1+memAccessTile_MWrapInST)%4;
 			const int sendNum_BelongIterTileNIdx=(threadLinearIdxInWarp/ITERTILE_NSIZE)+(4-1-memAccessTile_MWrapInST);
 			int srcLane=(threadLinearIdxInWarp+8+8*memAccessTile_MWrapInST)%32;
-			C_On1ShuffleTile[receiveNum_BelongMemAccessTileMIdxInST]=__shfl_sync(0xffffffff,srcLane,thisThreadCal_ABResult[shuffleTile_MIdxInWT][sendNum_BelongIterTileNIdx]);
+			C_On1ShuffleTile[receiveNum_BelongMemAccessTileMIdxInST]=__shfl_sync(0xffffffff,thisThreadCal_ABResult[shuffleTile_MIdxInWT][sendNum_BelongIterTileNIdx],srcLane);
 		}
 		//Cの元の値にABを足し合わせる
 		//Cの値をグローバルメモリに書き込む
@@ -251,7 +245,7 @@ __global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr)
 		{
 			int MIdx_AccessInC=MIdx_ShuffleTileStartInC+memAccessTile_MIdxInST;
 			int NIdx_AccessInC=NIdx_ShuffleTileStartInC+threadLinearIdxInWarp;
-			C_devPtr[MIdx_AccessInC*N+NIdx_AccessInC]=C_On1ShuffleTile[memAccessTile_MIdxInST];
+			C_devPtr[MIdx_AccessInC*N+NIdx_AccessInC]+=C_On1ShuffleTile[memAccessTile_MIdxInST];
 		}
 	}
 
@@ -275,9 +269,13 @@ int main()
 	float *B_devPtr;
 	float *C_devPtr;
 
-	cudaMalloc(&A_devPtr,sizeof(float)*M*K);
-	cudaMalloc(&B_devPtr,sizeof(float)*K*N);
-	cudaMalloc(&C_devPtr,sizeof(float)*M*N);
+	int err;
+	err=cudaMalloc(&A_devPtr,sizeof(float)*M*K);
+	if(err){printf("memAccessErr1\n");}
+	err=cudaMalloc(&B_devPtr,sizeof(float)*K*N);
+	if(err){printf("memAccessErr1\n");}
+	err=cudaMalloc(&C_devPtr,sizeof(float)*M*N);
+	if(err){printf("memAccessErr1\n");}
 
 	for(int m=0;m<M;m++)
 	{
@@ -300,24 +298,28 @@ int main()
 			C_hostPtr[m*N+n]=m+n;
 		}
 	}
+	
+	err=cudaMemcpy(A_devPtr, A_hostPtr, M*K*sizeof(float), cudaMemcpyHostToDevice);
+	if(err){printf("memAccessErr1\n");}
+	err=cudaMemcpy(B_devPtr, B_hostPtr, K*N*sizeof(float), cudaMemcpyHostToDevice);
+	if(err){printf("memAccessErr1\n");}
+	err=cudaMemcpy(C_devPtr, C_hostPtr, M*N*sizeof(float), cudaMemcpyHostToDevice);
+	if(err){printf("memAccessErr1\n");}
 
-	cudaMemcpy(A_devPtr, A_hostPtr, M*K*sizeof(float), cudaMemcpyHostToDevice);
-	cudaMemcpy(B_devPtr, B_hostPtr, K*N*sizeof(float), cudaMemcpyHostToDevice);
-	cudaMemcpy(C_devPtr, C_hostPtr, M*N*sizeof(float), cudaMemcpyHostToDevice);
-
+	printf("BeforeLaunchError:%s\n", cudaGetErrorString(cudaGetLastError()));
 	dim3 const threadBlock_dim{BLOCKTILE_NDIMNUM, BLOCKTILE_MDIMNUM, 1};
 	dim3 const thread_dim{WARPNUM_INBLOCK*32, 1, 1};
-	printf("んなぁ\n");
 	MyGemm<<<threadBlock_dim,thread_dim,0,stream>>>(C_devPtr,A_devPtr,B_devPtr);
-	printf("んなぁ2\n");
-	
+	printf("PrelaunchError:%s\n", cudaGetErrorString(cudaGetLastError()));
+	cudaDeviceSynchronize();
+	printf("asyncError:%s\n", cudaGetErrorString(cudaGetLastError()));
 	cudaMemcpy(C_hostPtr,C_devPtr,  M*N*sizeof(float), cudaMemcpyDeviceToHost);
 
-	for(int m=0;m<10;m++)
+	for(int m=0;m<20;m++)
 	{
-		for(int n=0;n<10;n++)
+		for(int n=0;n<20;n++)
 		{
-			printf("%lf ",C_hostPtr[m*N+n]);
+			printf("%6.3lf ",C_hostPtr[m*N+n]);
 		}
 		printf("\n");
 	}
