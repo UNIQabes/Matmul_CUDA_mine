@@ -1,14 +1,18 @@
 #include <stdio.h>
 #include <mma.h>
+#include <chrono>
+#include <iostream>
+
+using namespace std::chrono;
+using namespace std;
+//やってみたら大体8TFLOPSだった(V100の単精度浮動小数点数演算性能は14TFlops)
 
 //タイリングの階層は
 //ブロックタイル(シェアードメモリの容量/2くらい z方向はベクタータイルの数分行えればそれでよい)>イテレータータイル(ブロックタイル/ワープタイル)>ワープタイル(32)>ベクタータイル(kの分割)
-//これに加えて、ワープシャッフルも使っていこうと思う
-
-
-#define M 2048
-#define N 2048
-#define K 2048
+//これに加えて、ワープシャッフルも使う
+#define M 8192
+#define N 8192
+#define K 8192
 
 #define BLOCKTILE_MSIZE 64
 #define BLOCKTILE_NSIZE 64
@@ -56,15 +60,19 @@ constexpr int THREADNUM_INBLOCK = WARPNUM_INBLOCK*32;
 
 
 
-//C=A*Bを計算する
-//
-__global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr)
+//C+=A*Bを計算する
+__global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr,int m,int n,int k,int C_Stride,int A_Stride,int B_Stride)
 {
 	constexpr int A_1BLOCKTILESIZE=BLOCKTILE_MSIZE*BLOCKTILE_KSIZE;
 	constexpr int A_LOAD1BLOCKTILETOSHARED_ITERATIONNUM=A_1BLOCKTILESIZE/THREADNUM_INBLOCK;
 
 	constexpr int B_1BLOCKTILESIZE=BLOCKTILE_KSIZE*BLOCKTILE_NSIZE;
 	constexpr int B_LOAD1BLOCKTILETOSHARED_ITERATIONNUM=B_1BLOCKTILESIZE/THREADNUM_INBLOCK;
+
+	const int MdimNum_BlockTile=(m+BLOCKTILE_MSIZE-1)/BLOCKTILE_MSIZE;
+	const int NdimNum_BlockTile=(n+BLOCKTILE_NSIZE-1)/BLOCKTILE_NSIZE;
+	const int KdimNum_BlockTile=(k+BLOCKTILE_KSIZE-1)/BLOCKTILE_KSIZE;
+
 
 	const int threadLinearIdxInBlock=threadIdx.x;
 	const int warpLinearIdxInBlock=threadLinearIdxInBlock/32;
@@ -104,7 +112,7 @@ __global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr)
 	//if(threadLinearIdxInBlock==0){printf("%d, %d, %d\n",Midx_ThisBlockBlockTile,Nidx_ThisBlockBlockTile,threadLinearIdxInBlock);}
 	
 	///このブロックの計算に使うA/Bのブロックタイルの中で、blockTile_kIdx番目のブロックタイルを読み込み、それについての計算を行う。
-	for(int blockTile_kIdx=0;blockTile_kIdx<BLOCKTILE_KDIMNUM;blockTile_kIdx++)
+	for(int blockTile_kIdx=0;blockTile_kIdx<KdimNum_BlockTile;blockTile_kIdx++)
 	{
 		__syncthreads();
 		//Aをブロックタイルで分割した時の(blockIdx.y, blockTile_kIdx)番目のブロックをシェアードメモリに読み込む
@@ -117,7 +125,17 @@ __global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr)
 			const int loadNum_KIdxInBlock=loadNum_LinearIdxInBlock%BLOCKTILE_KSIZE;
 			const int loadNum_MIdx=A_LoadBlockStartMIdx+loadNum_MIdxInBlock;
 			const int loadNum_KIdx=A_LoadBlockStartKIdx+loadNum_KIdxInBlock;
-			ATransposed_OnShared[loadNum_KIdxInBlock][loadNum_MIdxInBlock]=A_devPtr[K*loadNum_MIdx+loadNum_KIdx];
+			int loadNum;
+			if(loadNum_MIdx<m && loadNum_KIdx<k)
+			{
+				loadNum=A_devPtr[loadNum_MIdx*A_Stride+loadNum_KIdx];
+			}
+			else
+			{
+				loadNum=0;
+			}
+			
+			ATransposed_OnShared[loadNum_KIdxInBlock][loadNum_MIdxInBlock]=loadNum;
 		}
 		
 		//Bをブロックタイルで分割した時の(blockTile_kIdx,blockIdx.x)番目のブロックをシェアードメモリに読み込む
@@ -130,8 +148,16 @@ __global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr)
 			const int loadNum_NIdxInBlock=loadNum_LinearIdxInBlock%BLOCKTILE_NSIZE;
 			const int loadNum_KIdx=B_LoadBlockStartKIdx+loadNum_KIdxInBlock;
 			const int loadNum_NIdx=B_LoadBlockStartNIdx+loadNum_NIdxInBlock;
-
-			B_OnShared[loadNum_KIdxInBlock][loadNum_NIdxInBlock]=B_devPtr[N*loadNum_KIdx +loadNum_NIdx];
+			int loadNum;
+			if(loadNum_NIdx<n && loadNum_KIdx<k)
+			{
+				loadNum=B_devPtr[B_Stride*loadNum_KIdx +loadNum_NIdx];
+			}
+			else
+			{
+				loadNum=0;
+			}
+			B_OnShared[loadNum_KIdxInBlock][loadNum_NIdxInBlock]=loadNum;
 		}
 		__syncthreads();
 
@@ -245,7 +271,7 @@ __global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr)
 		{
 			int MIdx_AccessInC=MIdx_ShuffleTileStartInC+memAccessTile_MIdxInST;
 			int NIdx_AccessInC=NIdx_ShuffleTileStartInC+threadLinearIdxInWarp;
-			C_devPtr[MIdx_AccessInC*N+NIdx_AccessInC]+=C_On1ShuffleTile[memAccessTile_MIdxInST];
+			C_devPtr[MIdx_AccessInC*C_Stride+NIdx_AccessInC]+=C_On1ShuffleTile[memAccessTile_MIdxInST];
 		}
 	}
 
@@ -317,14 +343,21 @@ int main()
 	if(err){printf("memAccessErr1\n");}
 
 	printf("BeforeLaunchError:%s\n", cudaGetErrorString(cudaGetLastError()));
+
 	dim3 const threadBlock_dim{BLOCKTILE_NDIMNUM, BLOCKTILE_MDIMNUM, 1};
 	dim3 const thread_dim{WARPNUM_INBLOCK*32, 1, 1};
-	MyGemm<<<threadBlock_dim,thread_dim,0,stream>>>(C_devPtr,A_devPtr,B_devPtr);
+	system_clock::time_point start = system_clock::now();  
+	MyGemm<<<threadBlock_dim,thread_dim,0,stream>>>(C_devPtr,A_devPtr,B_devPtr,M-12,N-12,K-12,N,K,N);
 	printf("PrelaunchError:%s\n", cudaGetErrorString(cudaGetLastError()));
-	cudaDeviceSynchronize();
-	printf("asyncError:%s\n", cudaGetErrorString(cudaGetLastError()));
-	cudaMemcpy(C_hostPtr,C_devPtr,  M*N*sizeof(float), cudaMemcpyDeviceToHost);
 
+	cudaDeviceSynchronize();
+	system_clock::time_point end = system_clock::now();  
+	printf("asyncError:%s\n", cudaGetErrorString(cudaGetLastError()));
+	
+	nanoseconds dur=duration_cast<nanoseconds>(end-start);
+	cout << dur.count() << " nanosec" <<endl;
+
+	cudaMemcpy(C_hostPtr,C_devPtr,  M*N*sizeof(float), cudaMemcpyDeviceToHost);
 	for(int m=0;m<50;m++)
 	{
 		for(int n=0;n<50;n++)
