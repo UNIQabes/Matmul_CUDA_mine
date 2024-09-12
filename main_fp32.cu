@@ -3,6 +3,7 @@
 #include <chrono>
 #include <iostream>
 
+
 using namespace std::chrono;
 using namespace std;
 //やってみたら大体8TFLOPSだった(V100の単精度浮動小数点数演算性能は14TFlops)
@@ -13,6 +14,7 @@ using namespace std;
 #define M 8192
 #define N 8192
 #define K 8192
+
 
 #define BLOCKTILE_MSIZE 64
 #define BLOCKTILE_NSIZE 64
@@ -57,6 +59,7 @@ constexpr int MEMACCESSTILE_MDIMNUM_INST = SHUFFLETILE_MSIZE/MEMACCESSTILE_MSIZE
 
 constexpr int WARPNUM_INBLOCK = WARPTILE_MDIMNUM_INBT*WARPTILE_NDIMNUM_INBT;
 constexpr int THREADNUM_INBLOCK = WARPNUM_INBLOCK*32;
+
 
 
 
@@ -118,6 +121,7 @@ __global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr,int m,in
 		//Aをブロックタイルで分割した時の(blockIdx.y, blockTile_kIdx)番目のブロックをシェアードメモリに読み込む
 		const int A_LoadBlockStartMIdx=Midx_ThisBlockBlockTileStartInC;
 		const int A_LoadBlockStartKIdx=blockTile_kIdx*BLOCKTILE_KSIZE;
+		#pragma unroll
 		for(int i=0;i<A_LOAD1BLOCKTILETOSHARED_ITERATIONNUM;i++)
 		{
 			const int loadNum_LinearIdxInBlock=i*THREADNUM_INBLOCK+threadLinearIdxInBlock;
@@ -141,6 +145,7 @@ __global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr,int m,in
 		//Bをブロックタイルで分割した時の(blockTile_kIdx,blockIdx.x)番目のブロックをシェアードメモリに読み込む
 		const int B_LoadBlockStartKIdx=blockTile_kIdx*BLOCKTILE_KSIZE;
 		const int B_LoadBlockStartNIdx=Nidx_ThisBlockBlockTileStartInC;
+		#pragma unroll
 		for(int i=0;i<B_LOAD1BLOCKTILETOSHARED_ITERATIONNUM;i++)
 		{
 			const int loadNum_LinearIdxInBlock=i*THREADNUM_INBLOCK+threadLinearIdxInBlock;
@@ -166,6 +171,7 @@ __global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr,int m,in
 		
 
 		//Cの各要素はAの行ベクトルとBの列ベクトルの内積。その2つのベクトルのblockTile_kIdx*BLOCKTILE_KSIZE+num_kIdxInBT番目の値の積を求め、和に足しこむ
+		#pragma unroll
 		for(int num_kIdxInBT=0;num_kIdxInBT<BLOCKTILE_KSIZE;num_kIdxInBT++)
 		{
 			//[行/列]方向の0~([ITERTILE_NDIMNUM_INWT/ITERTILE_MDIMNUM_INWT]-1)番目のイテレーションタイル内の、自分の担当するCの要素の計算で使う[B/A]の値を読み込む配列。
@@ -179,6 +185,7 @@ __global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr,int m,in
 			//-> i * ITERTILE_MSIZE + (threadLinearIdxInWarp/ITERTILE_NSIZE_INWT)%ITERTILE_MSIZE_INWT番目のスレッドが読み込んだ値を全て受け取れば良い。
 			float A_BroadCastNum=ATransposed_OnShared[num_kIdxInBT][WARPTILE_MSIZE*Midx_ThisWarpWarpTileInBT+threadLinearIdxInWarp];
 			//列(M)方向の0~(ITERTILE_MDIMNUM_INWT-1)番目のイテレーションタイル内の、自分の担当するCの要素の計算で使うAの値を読み込む
+			#pragma unroll
 			for(int MDim_IterTileIdx=0;MDim_IterTileIdx<ITERTILE_MDIMNUM_INWT;MDim_IterTileIdx++)
 			{
 				A_RegCachedNum[MDim_IterTileIdx]=__shfl_sync(0xffffffff,A_BroadCastNum,MDim_IterTileIdx*ITERTILE_MSIZE + threadLinearIdxInWarp/ITERTILE_NSIZE);
@@ -188,14 +195,16 @@ __global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr,int m,in
 			//->i * ITERTILE_NSIZE + threadLinearIdxInWarp%ITERTILE_NSIZE番目のスレッドが読み込んだ値を全て受け取れば良い。
 			float B_BroadCastNum=B_OnShared[num_kIdxInBT][WARPTILE_NSIZE*Nidx_ThisWarpWarpTileInBT+threadLinearIdxInWarp];
 			//行(N)方向の0~(ITERTILE_NDIMNUM_INWT-1)番目のイテレーションタイル内の、自分の担当するCの要素の計算で使うBの値を読み込む
+			#pragma unroll
 			for(int NDim_IterTileIdx=0;NDim_IterTileIdx<ITERTILE_NDIMNUM_INWT;NDim_IterTileIdx++)
 			{
 				B_RegCachedNum[NDim_IterTileIdx]=__shfl_sync(0xffffffff,B_BroadCastNum,NDim_IterTileIdx*ITERTILE_NSIZE + threadLinearIdxInWarp%ITERTILE_NSIZE);
 			}
 			//(MDim_IterTileIdx,NDim_IterTileIdx)番目のIterTileを内の自分が担当するCの値に足し込む積を計算する
+			#pragma unroll
 			for(int MDim_IterTileIdx=0;MDim_IterTileIdx<ITERTILE_MDIMNUM_INWT;MDim_IterTileIdx++)
 			{
-				
+				#pragma unroll
 				for(int NDim_IterTileIdx=0;NDim_IterTileIdx<ITERTILE_NDIMNUM_INWT;NDim_IterTileIdx++)
 				{
 					thisThreadCal_ABResult[MDim_IterTileIdx][NDim_IterTileIdx]+=A_RegCachedNum[MDim_IterTileIdx]*B_RegCachedNum[NDim_IterTileIdx];
@@ -245,7 +254,7 @@ __global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr,int m,in
 
 	//このスレッドがグローバルメモリに書き込む値を格納する。
 	float C_On1ShuffleTile[SHUFFLETILE_MSIZE];
-
+	#pragma unroll
 	for(int shuffleTile_MIdxInWT=0;shuffleTile_MIdxInWT<SHUFFLETILE_MDIMNUM_INWT;shuffleTile_MIdxInWT++)
 	{
 		//自分がすでに持っているABの計算結果の値を格納する
@@ -253,6 +262,7 @@ __global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr,int m,in
 		//一般化して、IterTiles[n][threadLinearIdx/ITERTILE_NSIZE]の中の自分が担当していた値
 		C_On1ShuffleTile[threadLinearIdxInWarp/ITERTILE_NSIZE]=thisThreadCal_ABResult[shuffleTile_MIdxInWT][threadLinearIdxInWarp/ITERTILE_NSIZE];
 		//他のワープからABの計算結果の値を受け取る
+		#pragma unroll
 		for(int memAccessTile_MWrapInST=0;memAccessTile_MWrapInST<MEMACCESSTILE_MDIMNUM_INST-1;memAccessTile_MWrapInST++)
 		{
 			const int receiveNum_BelongMemAccessTileMIdxInST=(threadLinearIdxInWarp/ITERTILE_NSIZE+1+memAccessTile_MWrapInST)%4;
@@ -266,7 +276,7 @@ __global__ void MyGemm(float *C_devPtr, float *A_devPtr,float *B_devPtr,int m,in
 		//Cの値をグローバルメモリに書き込む
 		const int MIdx_ShuffleTileStartInC=Midx_ThisWarpWarpTileStartInC+shuffleTile_MIdxInWT*SHUFFLETILE_MSIZE;
 		const int NIdx_ShuffleTileStartInC=Nidx_ThisWarpWarpTileStartInC;
-
+		#pragma unroll
 		for(int memAccessTile_MIdxInST=0;memAccessTile_MIdxInST<MEMACCESSTILE_MDIMNUM_INST;memAccessTile_MIdxInST++)
 		{
 			int MIdx_AccessInC=MIdx_ShuffleTileStartInC+memAccessTile_MIdxInST;
@@ -347,7 +357,7 @@ int main()
 	dim3 const threadBlock_dim{BLOCKTILE_NDIMNUM, BLOCKTILE_MDIMNUM, 1};
 	dim3 const thread_dim{WARPNUM_INBLOCK*32, 1, 1};
 	system_clock::time_point start = system_clock::now();  
-	MyGemm<<<threadBlock_dim,thread_dim,0,stream>>>(C_devPtr,A_devPtr,B_devPtr,M-12,N-12,K-12,N,K,N);
+	MyGemm<<<threadBlock_dim,thread_dim,0,stream>>>(C_devPtr,A_devPtr,B_devPtr,M,N,K,N,K,N);
 	printf("PrelaunchError:%s\n", cudaGetErrorString(cudaGetLastError()));
 
 	cudaDeviceSynchronize();
